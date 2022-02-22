@@ -1,0 +1,221 @@
+#!unzip "/content/drive/MyDrive/Medical Data/CTScanDICOM.zip" -d "/content/drive/MyDrive/Medical Data A"
+
+# Dicom = Digital Imaging and Communication in Medical (Medical Image Format)
+# TIFF = Binary File Standard
+
+!pip install pydicom
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Display Image Data
+from PIL import Image
+import cv2
+import pydicom
+# For TIFF
+from skimage.transform import resize
+# Segmentation 
+from glob import glob
+sns.set_style('whitegrid')
+
+custom_colors = ['#74a09e','#86c1b2','#98e2c6','#f3c969','#f2a553', '#d96548', '#c14953']
+sns.palplot(sns.color_palette(custom_colors))
+sns.despine(left=True, bottom=True)
+
+data_df = pd.read_csv("/content/drive/MyDrive/Medical Data/CTScanDICOM/overview.csv")
+data_df
+
+import os
+PATH = "/content/drive/MyDrive/Medical Data/CTScanDICOM/"
+print("Number of TIFF Images: ", len(os.listdir(os.path.join(PATH, "tiff_images"))))
+
+# glob will be used to find all path names that matches '*.tif'
+tiff_data = pd.DataFrame([{'path' : filepath} for filepath in glob(PATH + 'tiff_images/*.tif')])
+
+tiff_data
+
+def process_image(path):
+    data = pd.DataFrame([{'path' : filepath} for filepath in glob(PATH + path)])
+    data['file'] = data['path'].map(os.path.basename)
+    data['ID'] = data['file'].map(lambda x : str(x.split('_')[1]))
+    data['Age'] = data['file'].map(lambda x : str(x.split('_')[3]))
+    data['Contrast'] = data['file'].map(lambda x : str(x.split('_')[5]))
+    data['Modality'] = data['file'].map(lambda x : str(x.split('_')[6].split('.')[-2]))
+    return data
+
+tiff_data = process_image('tiff_images/*.tif')
+tiff_data
+
+dicom_data = process_image('dicom_dir/*dcm')
+dicom_data
+
+plt.figure(figsize = (8,7))
+sns.countplot(data_df['Contrast'], palette=custom_colors[2:4])
+
+plt.figure(figsize=(8,7))
+sns.distplot(data_df['Age'], color = custom_colors[5], hist = False, kde_kws=dict(lw = 6, ls = '--'))
+
+grid = sns.FacetGrid(data_df, col = "Contrast", size = 8, hue_kws={'color' : [custom_colors[2], custom_colors[5]]}, hue = 'Contrast')
+grid = grid.map(sns.distplot, "Age")
+
+### Read TIFF Data 
+from skimage.io import imread
+# To Read Dicom Image
+import pydicom as dicom
+
+def show_images(data, dim = 16, imtype = 'TIFF'):
+    img_data = list(data[:dim].T.to_dict().values())
+    f, ax = plt.subplots(4, 4, figsize = (16,20))
+    for i, data_row in enumerate(img_data):
+        if (imtype == 'TIFF'):
+            data_row_img = imread(data_row['path'])
+        elif (imtype == 'DICOM'):
+            data_row_img = dicom.read_file(data_row['path'])
+        if (imtype == 'TIFF'):
+            # Display Image Array as a subplot of 4 x 4 in figure window
+            ax[i//4, i%4].matshow(data_row_img)
+        elif(imtype == 'DICOM'):
+            ax[i//4, i%4].imshow(data_row_img.pixel_array, cmap = plt.cm.bone)
+        ax[i//4, i%4].axis('off')
+        ax[i//4, i%4].set_title('Modality: {Modality} Age: {Age}\n PatientID: {ID} Contrast: {Contrast}'.format(**data_row))
+    plt.show()
+
+show_images(tiff_data, 16, 'TIFF')
+
+show_images(dicom_data, 16, 'DICOM')
+
+PATH = "/content/drive/MyDrive/Medical Data/CTScanDICOM/"
+
+all_images_list = glob(os.path.join(PATH, 'tiff_images', '*.tif'))
+all_images_list[:5]
+
+# show TIFF Image Shape 
+imread(all_images_list[0]).shape
+
+np.expand_dims(imread(all_images_list[0])[::2, ::2], 0)
+
+___________________________________
+
+# read samples & expand dimentionality
+jimread = lambda x : np.expand_dims(imread(x)[::2, ::2], 0)
+
+import re
+
+check_contrast = re.compile(r'ID_([\d]+)_AGE_[\d]+_CONTRAST_([\d]+)_CT')
+label = []
+id_list = []
+for image in all_images_list:
+    id_list.append(check_contrast.findall(image)[0][0])
+    label.append(check_contrast.findall(image)[0][1])
+
+label_list = pd.DataFrame(label, id_list)
+label_list
+
+# To merge all samples - Array of Images (concatination) , axis = 0
+images = np.stack([jimread(i) for i in all_images_list], 0)
+
+--------------------------------------
+from sklearn.model_selection import train_test_split
+x_train, x_test, y_train, y_test = train_test_split(images, label_list, test_size = 0.15, random_state = 0)
+
+n_train, depth , width, length = x_train.shape
+n_test , _, _, _ = x_test.shape
+
+input_train = x_train.reshape(n_train, width, length, depth)
+input_train.shape
+
+# Image Pixel Scaling
+input_train.astype('float32')
+input_train = input_train / np.max(input_train)
+
+input_test = x_test.reshape(n_test, width, length, depth)
+input_test.shape
+
+input_test = x_test.reshape(n_test, width, length, depth)
+input_test.astype('float32')
+input_test = input_test / np.max(input_test)
+
+-------------------------------------------------------
+
+from tensorflow.keras.utils import to_categorical
+output_train = to_categorical(y_train, 2)
+output_test = to_categorical(y_test, 2)
+
+print(output_test)
+
+-------------------------------------------------------
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dropout, Dense
+from tensorflow.keras.optimizers import Adam
+
+def build_model():
+    model = Sequential()
+    # Conv Layer - I
+    model.add(Conv2D(filters = 64, kernel_size = (3,3), activation='relu', padding = 'same', input_shape = (256, 256, 1)))
+    model.add(MaxPooling2D(pool_size=(2,2), strides=(2,2)))
+    
+    # Conv Layer - II
+    model.add(Conv2D(filters = 128, kernel_size = (3,3), activation='relu', padding = 'same'))
+    model.add(MaxPooling2D(pool_size=(2,2), strides=(2,2)))
+
+    # Conv Layer - III
+    model.add(Conv2D(filters = 128, kernel_size = (3,3), activation='relu', padding = 'same'))
+    model.add(MaxPooling2D(pool_size=(2,2), strides=(2,2)))
+
+    # Conv Layer - IV
+    model.add(Conv2D(filters = 128, kernel_size = (3,3), activation='relu', padding = 'same'))
+    model.add(MaxPooling2D(pool_size=(2,2), strides=(2,2)))
+    
+    model.add(Flatten())
+    
+    # Input Layer - I
+    model.add(Dense(units = 256, activation='relu'))
+    model.add(Dropout(0.5))
+    # Output Layer 
+    model.add(Dense(units = 2, activation='softmax'))
+
+    # model compile
+    model.compile(optimizer = 'Adam', loss = 'categorical_crossentropy', metrics = ['accuracy'])
+    
+    return model
+
+model = build_model()
+
+model.summary()
+
+from tensorflow.keras import callbacks
+filepath = "/content/drive/MyDrive/CtScanDicom.hdf5"
+checkpoint = callbacks.ModelCheckpoint(filepath, monitor = "val_loss", save_best_only = True, mode='min',
+                                       verbose = 1)
+checkpoint
+
+import datetime
+from tensorflow import keras
+logdir = os.path.join("/content/drive/MyDrive/dicom_logs", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+tensorboard_callback = keras.callbacks.TensorBoard(logdir)
+
+history = model.fit(input_train, output_train, epochs=50, batch_size=20, shuffle=True, validation_data= (input_test, output_test), 
+                    steps_per_epoch = 5, callbacks = [checkpoint,tensorboard_callback], verbose = 1)
+
+# Load Weights
+model.load_weights("/content/drive/MyDrive/CtScanDicom.hdf5")
+
+%load_ext tensorboard
+
+%tensorboard --logdir "/content/drive/MyDrive/dicom_logs"
+
+model.evaluate(input_test, output_test)
+
+yhat = np.argmax(model.predict(input_test), axis = 1)
+yhat
+y_test = np.argmax(output_test, axis = 1)
+y_test
+
+from sklearn.metrics import classification_report, confusion_matrix
+confusion_matrix(y_test, yhat)
+
+sns.heatmap(confusion_matrix(y_test, yhat), annot = True, cmap = 'RdPu')
+
+print(classification_report(y_test, yhat)) 
